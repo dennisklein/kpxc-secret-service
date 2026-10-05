@@ -15,7 +15,7 @@ SHELL_SCRIPTS  := bin/kpxc-run bin/kpxc-secret libexec/kpxc-keepassxc libexec/sh
 PYTHON_SCRIPTS := bin/kpxc-secret-service libexec/kpxc-lock-relay
 UNITS          := $(wildcard units/*)
 
-.PHONY: all install check lint test dist rpm srpm clean
+.PHONY: all install check lint test dist rpm srpm clean build-deps test-deps require-root require-mock
 
 all:
 
@@ -51,16 +51,48 @@ dist: $(NAME)-$(VERSION).tar.gz
 $(NAME)-$(VERSION).tar.gz: $(shell git ls-files 2>/dev/null)
 	git ls-files | tar --transform 's,^,$(NAME)-$(VERSION)/,' -czf $@ -T -
 
-# Extra rpmbuild options, e.g. RPMBUILD_OPTS="--define 'kpxc_users alice'".
-RPMBUILD_OPTS ?=
-RPMBUILD = rpmbuild --define "_sourcedir $(CURDIR)" --define "_srcrpmdir $(CURDIR)" \
-                    --define "_rpmdir $(CURDIR)/rpms" $(RPMBUILD_OPTS)
+# Packages are built with mock in a clean chroot. MOCK_CHROOT is a mock
+# config such as fedora-44-x86_64; "default" follows the host's release.
+# Extra mock options, e.g. MOCK_OPTS="--define 'kpxc_users alice'".
+MOCK_CHROOT ?= default
+MOCK_OPTS   ?=
+RESULTDIR   ?= results/$(MOCK_CHROOT)
+MOCK         = mock -r $(MOCK_CHROOT) --resultdir $(RESULTDIR) $(MOCK_OPTS)
 
-rpm: dist
-	$(RPMBUILD) -bb $(NAME).spec
+srpm: require-mock dist
+	rm -f $(RESULTDIR)/$(NAME)-*.src.rpm
+	$(MOCK) --buildsrpm --spec $(NAME).spec --sources $(NAME)-$(VERSION).tar.gz
 
-srpm: dist
-	$(RPMBUILD) -bs $(NAME).spec
+rpm: srpm
+	$(MOCK) --rebuild $(RESULTDIR)/$(NAME)-$(VERSION)-*.src.rpm
+
+require-mock:
+	@command -v mock >/dev/null || { echo "mock is not installed; run: sudo make build-deps" >&2; exit 1; }
+
+# Host packages. These targets must be run as root by the user, e.g.
+# `sudo make build-deps`; the Makefile itself never calls sudo.
+BUILD_DEPS := mock git-core
+TEST_DEPS  := ShellCheck systemd glib2 dbus-daemon dbus-broker keepassxc libsecret \
+              desktop-file-utils python3-gobject-base 'python3dist(pykeepass)'
+
+# For `make rpm` and `make srpm`. Also adds the invoking user to the mock
+# group, which mock requires; note that membership is root-equivalent (mock(1)).
+build-deps: require-root
+	dnf install -y $(BUILD_DEPS)
+	@if [ -n "$${SUDO_USER-}" ] && [ "$$SUDO_USER" != root ] && \
+	    ! id -nG "$$SUDO_USER" | grep -qw mock; then \
+	    usermod -a -G mock "$$SUDO_USER" && \
+	    echo "Added $$SUDO_USER to the mock group; log in again (or run 'newgrp mock') before 'make rpm'."; \
+	fi
+
+# For `make lint` and `make test`.
+test-deps: require-root
+	dnf install -y $(TEST_DEPS)
+
+require-root:
+	@if [ "$$(id -u)" -ne 0 ]; then \
+	    echo "This installs packages, run it as root: sudo make $(MAKECMDGOALS)" >&2; exit 1; \
+	fi
 
 clean:
-	rm -rf $(NAME)-*.tar.gz *.src.rpm rpms
+	rm -rf $(NAME)-*.tar.gz results

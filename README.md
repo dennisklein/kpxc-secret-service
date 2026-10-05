@@ -19,15 +19,24 @@ in scripts.
 
 ## Install
 
-Build the RPM (needs `rpm-build` and `systemd-rpm-macros`) and install it:
+Build the RPM with mock, in a clean chroot of your Fedora release, and
+install it:
 
 ```sh
-make rpm
-sudo dnf install rpms/noarch/kpxc-secret-service-*.noarch.rpm
+sudo make build-deps     # once: installs mock and git, adds you to the mock group
+make rpm                 # after logging in again, so the group applies
+sudo dnf install results/default/kpxc-secret-service-*.noarch.rpm
 ```
 
-`make srpm` produces a source RPM for mock or COPR. The package requires
-`keepassxc` and `dbus-broker`, both from Fedora.
+`make srpm` stops after the source RPM, e.g. for COPR. Results land in
+`results/<chroot>/`. Pick another chroot with
+`make rpm MOCK_CHROOT=fedora-44-x86_64`, and pass extra mock options with
+`MOCK_OPTS`. Being in the mock group is effectively root access (see
+`mock(1)`). The package requires `keepassxc` and `dbus-broker`, both from
+Fedora.
+
+The `*-deps` targets install packages, so they refuse to run unless you
+start them with `sudo`. Nothing in the Makefile calls `sudo` itself.
 
 Then choose the users, in whichever way suits you:
 
@@ -35,7 +44,7 @@ Then choose the users, in whichever way suits you:
 |---|---|
 | Administrator | `sudo kpxc-secret-service enable alice` creates `/etc/kpxc-secret-service/users.d/alice`. Works for users who have never logged in. If alice is logged in, it starts right away. |
 | The user | `kpxc-secret-service enable` creates `~/.config/kpxc-secret-service/enabled` and starts everything. |
-| Package build | `make rpm RPMBUILD_OPTS="--define 'kpxc_users alice'"` builds a package that already contains alice's opt-in, so installing it is the only step. |
+| Package build | `make rpm MOCK_OPTS="--define 'kpxc_users alice'"` builds a package that already contains alice's opt-in, so installing it is the only step. |
 
 One step stays inside KeePassXC, because the setting lives in each database:
 choose which group a database exposes under **Database → Database Settings →
@@ -191,9 +200,10 @@ journalctl --user -u kpxc-secret-service -u kpxc-bus -u kpxc-lock-relay
 ## Development
 
 ```sh
-make check   # syntax checks (also run by the RPM's %check)
-make lint    # shellcheck + systemd-analyze verify
-make test    # tests/smoke-test.sh
+sudo make test-deps   # once: tools for lint and test
+make check            # syntax checks (also run by the RPM's %check)
+make lint             # shellcheck + systemd-analyze verify (needs the package installed)
+make test             # tests/smoke-test.sh
 ```
 
 The smoke test runs without systemd. It builds a throwaway desktop bus with a
