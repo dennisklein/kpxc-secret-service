@@ -206,6 +206,29 @@ pass "kpxc-secret stores secrets in KeePassXC"
 pass "plain secret-tool still talks to the desktop's Secret Service"
 
 # --- lock relay -------------------------------------------------------------------
+# KeePassXC ignores signals from a relay that waits in the queue for a name
+# someone else owns, so the relay must fail instead.
+"$PYTHON" - "$private" <<'EOF' &
+import sys
+from gi.repository import Gio, GLib
+bus = Gio.DBusConnection.new_for_address_sync(
+    sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+    | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+              "RequestName", GLib.Variant("(su)", ("org.gnome.ScreenSaver", 4)), None, 0, -1, None)
+GLib.MainLoop().run()
+EOF
+squatter=$!
+pids+=("$squatter")
+gdbus wait --address "$private" --timeout 10 org.gnome.ScreenSaver
+status=0
+timeout 10 "$PYTHON" "$repo/libexec/kpxc-lock-relay" 2>"$T/relay-squatted.log" || status=$?
+[ "$status" = 1 ] ||
+    fail "relay exited with $status while another connection owned a name: $(cat "$T/relay-squatted.log")"
+pass "the relay fails when it cannot own a screen saver name"
+kill "$squatter"
+for _ in $(seq 50); do [ -z "$(owner "$private" org.gnome.ScreenSaver)" ] && break; sleep 0.1; done
+
 "$PYTHON" "$repo/libexec/kpxc-lock-relay" 2>"$T/relay.log" &
 pids+=($!)
 gdbus wait --address "$private" --timeout 10 org.gnome.ScreenSaver

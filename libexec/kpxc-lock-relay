@@ -59,14 +59,25 @@ def main():
         bus.set_exit_on_close(False)
         bus.connect("closed", on_closed)
 
+    def on_name_lost(_connection, name):
+        nonlocal status
+        log(f"Could not own {name} on the private bus, exiting")
+        status = 1
+        loop.quit()
+
     def relay(_connection, _sender, path, interface, member, parameters, *_):
         log(f"Relaying {interface}.{member}{parameters}")
         private.emit_signal(None, path, interface, member, parameters)
 
     # The receiving side matches signals by the well-known sender name, so the
-    # relay must own each name on the private bus before re-emitting.
+    # relay must own each name on the private bus before re-emitting. Signals
+    # sent while another connection owns the name are dropped silently, so
+    # fail instead of waiting in its queue: systemd and `kpxc-secret-service
+    # doctor` then show that the databases no longer lock with the screen.
     for name, path, interface, member in SIGNALS:
-        Gio.bus_own_name_on_connection(private, name, Gio.BusNameOwnerFlags.NONE, None, None)
+        Gio.bus_own_name_on_connection(
+            private, name, Gio.BusNameOwnerFlags.DO_NOT_QUEUE, None, on_name_lost
+        )
         desktop.signal_subscribe(
             name, interface, member, path, None, Gio.DBusSignalFlags.NONE, relay
         )
