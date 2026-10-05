@@ -278,6 +278,23 @@ pass "status and doctor run"
 
 kill -9 "$keepassxc_pid"
 wait "$keepassxc_pid" 2>/dev/null || :
+
+# `disable USER` (root only) deletes users.d/USER, so USER must not be a path.
+"$PYTHON" -B - "$repo/bin/kpxc-secret-service" <<'EOF' || fail "users.d accepts paths as user names"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("kpxc_secret_service", sys.argv[1])
+module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(module)
+for name in ("../../passwd", "/etc/passwd", "..", ""):
+    try:
+        module.users_d_marker(name)
+    except module.Error:
+        continue
+    sys.exit(f"accepted {name!r}")
+assert module.users_d_marker("alice") == module.USERS_DIR / "alice"
+EOF
+pass "disable USER refuses names that point outside of users.d"
+
 "$PYTHON" "$repo/bin/kpxc-secret-service" disable >/dev/null 2>&1 || :
 grep -qx 'Enabled=false' "$ini" || fail "disable left FdoSecrets enabled"
 [ ! -e "$menu" ] || fail "disable left the menu entry"
