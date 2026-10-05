@@ -29,10 +29,15 @@ trap cleanup EXIT
 
 export HOME=$T/home XDG_CONFIG_HOME=$T/home/.config XDG_DATA_HOME=$T/home/.local/share
 export XDG_RUNTIME_DIR=$T/run TMPDIR=$T/tmp QT_QPA_PLATFORM=offscreen
-export PATH=$repo/bin:$PATH
-unset DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY
-mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+export PATH=$repo/bin:$T/bin:$PATH
+unset DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XDG_SESSION_ID
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR" "$T/bin"
 chmod 700 "$XDG_RUNTIME_DIR"
+
+# logind as kpxc-keepassxc sees it: the user's graphical session.
+printf '#!/bin/sh\n[ "$1 $3 $4" = "show-user --property=Display --value" ] && echo smoke-session\n' \
+    >"$T/bin/loginctl"
+chmod +x "$T/bin/loginctl"
 
 desktop=unix:path=$XDG_RUNTIME_DIR/bus
 private=unix:path=$XDG_RUNTIME_DIR/kpxc-bus
@@ -167,6 +172,16 @@ etree.SubElement(item, "Key").text = "FDO_SECRETS_EXPOSED_GROUP"
 etree.SubElement(item, "Value").text = "{%s}" % kp.root_group.uuid
 kp.save()
 EOF
+
+# KeePassXC follows logind's Lock signal for the session in XDG_SESSION_ID.
+mkdir -p "$T/stub-session"
+printf '#!/bin/sh\necho "${XDG_SESSION_ID-}"\n' >"$T/stub-session/keepassxc"
+chmod +x "$T/stub-session/keepassxc"
+[ "$(PATH=$T/stub-session:$PATH "$repo/libexec/kpxc-keepassxc")" = smoke-session ] ||
+    fail "kpxc-keepassxc does not hand KeePassXC the user's graphical session"
+[ "$(XDG_SESSION_ID=own PATH=$T/stub-session:$PATH "$repo/libexec/kpxc-keepassxc")" = own ] ||
+    fail "kpxc-keepassxc replaced an XDG_SESSION_ID it was given"
+pass "kpxc-keepassxc hands KeePassXC the graphical session for logind's Lock signal"
 
 echo pw | "$repo/libexec/kpxc-keepassxc" --pw-stdin "$T/test.kdbx" >"$T/keepassxc.log" 2>&1 &
 keepassxc_pid=$!

@@ -24,6 +24,17 @@ if gdbus call --session --dest org.freedesktop.DBus \
     exit 75
 fi
 
+# KeePassXC locks when logind sends Lock to the session in XDG_SESSION_ID
+# (loginctl lock-session, HandleLidSwitch=lock, IdleAction=lock). The user
+# manager has no session of its own, so name the user's graphical session.
+if [ -z "${XDG_SESSION_ID-}" ]; then
+    session=$(loginctl show-user "$(id -u)" --property=Display --value 2>/dev/null) || session=
+    if [ -n "$session" ]; then
+        XDG_SESSION_ID=$session
+        export XDG_SESSION_ID
+    fi
+fi
+
 # Kept for the xdg-open shim: URLs and files opened from KeePassXC belong on
 # the desktop bus.
 KPXC_SECRET_SERVICE_DESKTOP_BUS=$desktop_bus
