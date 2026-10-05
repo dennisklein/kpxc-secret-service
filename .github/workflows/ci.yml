@@ -43,7 +43,8 @@ jobs:
               REPO_URL="file://$PWD/build/repo"
           dnf install -y build/repo/kpxc-secret-service-release-*.noarch.rpm
           dnf install -y kpxc-secret-service
-          rpm -qi kpxc-secret-service kpxc-secret-service-release | grep -E '^(Name|Version|Release|Signature)'
+          # Fails unless every package carries a valid signature by the imported key.
+          rpmkeys --checksig build/repo/*.rpm
           kpxc-secret-service --help > /dev/null
 
       - uses: actions/upload-artifact@v7
