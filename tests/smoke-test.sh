@@ -282,6 +282,9 @@ for command in status doctor; do
     case $out in *Traceback*) fail "kpxc-secret-service $command crashed: $out" ;; esac
 done
 pass "status and doctor run"
+# The test's keepassxc.ini has ConfirmAccessItem=false.
+case $out in *"without asking"*) ;; *) fail "doctor does not warn about ConfirmAccessItem=false: $out" ;; esac
+pass "doctor warns when KeePassXC hands out passwords without asking"
 
 kill -9 "$keepassxc_pid"
 wait "$keepassxc_pid" 2>/dev/null || :
