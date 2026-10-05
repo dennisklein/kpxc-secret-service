@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # The actions used in .github/workflows. The Fedora container image and
+  # mock chroot stay pinned to a release on purpose; bump those by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: CI

@@ -53,7 +53,10 @@ Fedora.
 
 The build uses the committed state (`HEAD`), not your working tree. The spec
 uses rpmautospec: `Release:` counts the commits since `Version:` last
-changed, and `%changelog` is generated from the commit messages.
+changed, and `%changelog` is generated from the commit messages. To keep a
+commit out of the changelog (CI changes, Dependabot's weekly GitHub Actions
+updates), put `[skip changelog]` on a line of its own in the message. For a
+squash merge, add the line to the merge message.
 
 The `*-deps` targets install packages, so they refuse to run unless you
 start them with `sudo`. Nothing in the Makefile calls `sudo` itself.
