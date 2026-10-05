@@ -1,0 +1,22 @@
+name: Build RPMs with mock
+description: >-
+  Run `make rpm` in a privileged Fedora container. mock refuses to run as
+  root, so the build runs as an unprivileged member of the mock group.
+inputs:
+  chroot:
+    description: mock chroot configuration
+    default: fedora-44-x86_64
+runs:
+  using: composite
+  steps:
+    - name: Build SRPM and RPMs
+      shell: bash
+      env:
+        CHROOT: ${{ inputs.chroot }}
+      run: |
+        dnf install -y make mock mock-rpmautospec
+        id builder >/dev/null 2>&1 || useradd --create-home --groups mock builder
+        chown -R builder: "$GITHUB_WORKSPACE"
+        # No podman in this container, so let mock install its bootstrap
+        # chroot with dnf instead of pulling an image.
+        runuser -u builder -- make rpm MOCK_CHROOT="$CHROOT" MOCK_OPTS=--no-bootstrap-image

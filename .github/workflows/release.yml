@@ -1,0 +1,104 @@
+name: Release
+
+# Pushing a tag vX.Y.Z (matching Version: in the spec) builds the packages,
+# signs them into a dnf repository, publishes that repository on GitHub
+# Pages and creates a GitHub release with the packages attached.
+#
+# One-time setup, see README.md ("Releases"):
+#   - secrets GPG_PRIVATE_KEY (ASCII-armored) and, if the key has one,
+#     GPG_PASSPHRASE
+#   - Settings → Pages → Source: GitHub Actions
+#   - Settings → Environments → github-pages: allow tags matching v*
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and sign
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:44
+      # mock mounts /proc, /sys and /dev into its chroot.
+      options: --privileged
+    permissions:
+      contents: write
+    steps:
+      # git before checkout (for .git), tar for upload-pages-artifact.
+      - name: Install tools
+        run: dnf install -y git-core tar gh createrepo_c rpm-sign gnupg2
+
+      - uses: actions/checkout@v4
+        with:
+          # rpmautospec derives Release and %changelog from the full history.
+          fetch-depth: 0
+
+      - name: Check the tag against the spec
+        run: |
+          version=$(sed -n 's/^Version:[[:space:]]*//p' kpxc-secret-service.spec)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Version: $version in kpxc-secret-service.spec"
+              exit 1
+          fi
+
+      - uses: ./.github/actions/mock-build
+        with:
+          chroot: fedora-44-x86_64
+
+      - name: Create the signed dnf repository
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+              echo "::error::Add the GPG_PRIVATE_KEY repository secret (see README.md)"
+              exit 1
+          fi
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          fingerprint=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
+          passphrase_file=
+          if [ -n "$GPG_PASSPHRASE" ]; then
+              passphrase_file=$GNUPGHOME/passphrase
+              printf '%s' "$GPG_PASSPHRASE" > "$passphrase_file"
+          fi
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          make repo MOCK_CHROOT=fedora-44-x86_64 GPG_KEY="$fingerprint" \
+              GPG_PASSPHRASE_FILE="$passphrase_file" \
+              REPO_URL="https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/repo
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" --generate-notes \
+              build/repo/*.rpm results/fedora-44-x86_64/*.src.rpm \
+              build/repo/RPM-GPG-KEY-kpxc-secret-service build/repo/kpxc-secret-service.repo
+
+  pages:
+    name: Publish the dnf repository
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -19,11 +19,19 @@ in scripts.
 
 ## Install
 
-Build the RPM with mock, in a clean chroot of your Fedora release, and
-install it:
+From the signed dnf repository that each release publishes:
 
 ```sh
-sudo make build-deps     # once: installs mock and git, adds you to the mock group
+sudo dnf config-manager addrepo \
+    --from-repofile=https://dennisklein.github.io/kpxc-secret-service/kpxc-secret-service.repo
+sudo dnf install kpxc-secret-service
+```
+
+Or build the RPM yourself with mock, in a clean chroot of your Fedora
+release, and install it:
+
+```sh
+sudo make build-deps     # once: mock, its rpmautospec plugin and git; adds you to the mock group
 make rpm                 # after logging in again, so the group applies
 sudo dnf install results/default/kpxc-secret-service-*.noarch.rpm
 ```
@@ -34,6 +42,10 @@ sudo dnf install results/default/kpxc-secret-service-*.noarch.rpm
 `MOCK_OPTS`. Being in the mock group is effectively root access (see
 `mock(1)`). The package requires `keepassxc` and `dbus-broker`, both from
 Fedora.
+
+The build uses the committed state (`HEAD`), not your working tree. The spec
+uses rpmautospec: `Release:` counts the commits since `Version:` last
+changed, and `%changelog` is generated from the commit messages.
 
 The `*-deps` targets install packages, so they refuse to run unless you
 start them with `sudo`. Nothing in the Makefile calls `sudo` itself.
@@ -196,6 +208,37 @@ journalctl --user -u kpxc-secret-service -u kpxc-bus -u kpxc-lock-relay
 | `/usr/libexec/kpxc-secret-service/` | KeePassXC launcher, lock relay, `xdg-open` shim |
 | `/usr/share/kpxc-secret-service/` | Bus configuration and the activation file |
 | `/etc/kpxc-secret-service/users.d/` | Users opted in by the administrator |
+
+## Releases
+
+CI (`.github/workflows/ci.yml`) builds the Fedora 44 x86_64 RPM and the
+SRPM with mock on every push and pull request, and keeps them as workflow
+artifacts.
+
+To release, set `Version:` in the spec, commit, then tag and push:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release workflow (`.github/workflows/release.yml`) checks the tag
+against `Version:`, builds the packages, and runs `make repo`: the RPMs are
+signed, the repository metadata is signed (`repo_gpgcheck`), and the public
+key and a `.repo` file are added. The workflow publishes the repository on
+GitHub Pages and attaches the packages to a GitHub release. The repository
+holds the latest release only.
+
+One-time setup on GitHub:
+
+1. Create a signing key without passphrase, or with one stored as the
+   `GPG_PASSPHRASE` secret. Store `gpg --armor --export-secret-keys KEY` as
+   the `GPG_PRIVATE_KEY` secret (Settings → Secrets and variables → Actions).
+2. Settings → Pages → Source: **GitHub Actions**.
+3. Settings → Environments → `github-pages` → Deployment branches and tags:
+   add the tag pattern `v*`. By default only the default branch may deploy.
+
+To sign locally: `make rpm && make repo GPG_KEY=you@example.org`. Install
+the tools with `sudo make repo-deps`.
 
 ## Development
 

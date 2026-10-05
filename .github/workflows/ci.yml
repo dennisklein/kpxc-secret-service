@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpm:
+    name: Fedora 44 x86_64 RPM and SRPM
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:44
+      # mock mounts /proc, /sys and /dev into its chroot.
+      options: --privileged
+    steps:
+      # Before checkout, which otherwise falls back to a download without .git.
+      - name: Install git
+        run: dnf install -y git-core
+
+      - uses: actions/checkout@v4
+        with:
+          # rpmautospec derives Release and %changelog from the full history.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/mock-build
+        with:
+          chroot: fedora-44-x86_64
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fedora-44-x86_64
+          path: |
+            results/fedora-44-x86_64/*.rpm
+            results/fedora-44-x86_64/*.log

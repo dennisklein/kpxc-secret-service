@@ -1,6 +1,6 @@
 Name:           kpxc-secret-service
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        %autorelease
 Summary:        KeePassXC as Secret Service on a private D-Bus bus, next to GNOME Keyring
 
 License:        MIT
@@ -26,7 +26,7 @@ Recommends:     libsecret
 Recommends:     libnotify
 
 # Optionally opt users in at build time, so installing the package is all it
-# takes: rpmbuild --define 'kpxc_users alice bob' ...
+# takes: make rpm MOCK_OPTS="--define 'kpxc_users alice bob'"
 %global kpxc_users %{?kpxc_users}
 
 %global units kpxc-bus.socket kpxc-secret-service.service
@@ -85,5 +85,4 @@ make check
 %endif
 
 %changelog
-* Mon Oct 05 2026 Packager <packager@example.invalid> - 0.1.0-1
-- Initial package
+%autochangelog
