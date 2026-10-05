@@ -1,8 +1,9 @@
 name: Release
 
-# Pushing a tag vX.Y.Z (matching Version: in the spec) builds the packages,
-# signs them into a dnf repository, publishes that repository on GitHub
-# Pages and creates a GitHub release with the packages attached.
+# Pushing a tag vX.Y.Z (matching Version: in the spec) builds the packages
+# and the kpxc-secret-service-release package (repository configuration and
+# signing key), signs them into a dnf repository, publishes that repository
+# on GitHub Pages and creates a GitHub release with the packages attached.
 #
 # One-time setup, see README.md ("Releases"):
 #   - secrets GPG_PRIVATE_KEY (ASCII-armored) and, if the key has one,
@@ -34,7 +35,7 @@ jobs:
     steps:
       # git before checkout (for .git), tar for upload-pages-artifact.
       - name: Install tools
-        run: dnf install -y git-core tar gh createrepo_c rpm-sign gnupg2
+        run: dnf install -y git-core tar gh rpm-build createrepo_c rpm-sign gnupg2
 
       - uses: actions/checkout@v7
         with:
@@ -54,6 +55,7 @@ jobs:
           chroot: fedora-44-x86_64
 
       - name: Create the signed dnf repository
+        id: sign
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
@@ -72,9 +74,10 @@ jobs:
               printf '%s' "$GPG_PASSPHRASE" > "$passphrase_file"
           fi
           owner=${GITHUB_REPOSITORY_OWNER,,}
-          make repo MOCK_CHROOT=fedora-44-x86_64 GPG_KEY="$fingerprint" \
+          make release-rpm repo MOCK_CHROOT=fedora-44-x86_64 GPG_KEY="$fingerprint" \
               GPG_PASSPHRASE_FILE="$passphrase_file" \
               REPO_URL="https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-pages-artifact@v5
         with:
@@ -83,10 +86,17 @@ jobs:
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          FINGERPRINT: ${{ steps.sign.outputs.fingerprint }}
         run: |
+          # Under a fixed name, so that .../releases/latest/download/
+          # kpxc-secret-service-release.noarch.rpm always finds it.
+          cp build/repo/kpxc-secret-service-release-*.noarch.rpm build/kpxc-secret-service-release.noarch.rpm
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" --generate-notes \
-              build/repo/*.rpm results/fedora-44-x86_64/*.src.rpm \
+              --notes "Packages and repository metadata are signed with the OpenPGP key \`$FINGERPRINT\`." \
+              build/kpxc-secret-service-release.noarch.rpm \
+              build/repo/kpxc-secret-service-[0-9]*.noarch.rpm \
+              results/fedora-44-x86_64/kpxc-secret-service-*.src.rpm \
               build/repo/RPM-GPG-KEY-kpxc-secret-service build/repo/kpxc-secret-service.repo
 
   pages:

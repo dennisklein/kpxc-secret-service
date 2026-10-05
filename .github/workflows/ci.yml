@@ -31,6 +31,21 @@ jobs:
         with:
           chroot: fedora-44-x86_64
 
+      # The release path with a throwaway key: release package and signed
+      # repository, then installing from it the way users do.
+      - name: Test the signed repository
+        run: |
+          dnf install -y rpm-build createrepo_c rpm-sign gnupg2
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          gpg --batch --passphrase '' --quick-gen-key 'kpxc-secret-service CI <ci@example.invalid>' default sign 1d
+          make release-rpm repo MOCK_CHROOT=fedora-44-x86_64 GPG_KEY=ci@example.invalid \
+              REPO_URL="file://$PWD/build/repo"
+          dnf install -y build/repo/kpxc-secret-service-release-*.noarch.rpm
+          dnf install -y kpxc-secret-service
+          rpm -qi kpxc-secret-service kpxc-secret-service-release | grep -E '^(Name|Version|Release|Signature)'
+          kpxc-secret-service --help > /dev/null
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -19,13 +19,21 @@ in scripts.
 
 ## Install
 
-From the signed dnf repository that each release publishes:
+From the signed dnf repository that each release publishes. The
+`kpxc-secret-service-release` package adds the repository
+(`/etc/yum.repos.d/kpxc-secret-service.repo`) and the key its packages are
+signed with (`/etc/pki/rpm-gpg/RPM-GPG-KEY-kpxc-secret-service`):
 
 ```sh
-sudo dnf config-manager addrepo \
-    --from-repofile=https://dennisklein.github.io/kpxc-secret-service/kpxc-secret-service.repo
+sudo dnf install https://github.com/dennisklein/kpxc-secret-service/releases/latest/download/kpxc-secret-service-release.noarch.rpm
 sudo dnf install kpxc-secret-service
 ```
+
+The second command asks you to import the key. Compare its fingerprint with
+the one in the release notes. After that, `dnf upgrade` brings updates,
+including updates to the release package itself. Without the release package,
+`sudo dnf config-manager addrepo --from-repofile=https://dennisklein.github.io/kpxc-secret-service/kpxc-secret-service.repo`
+sets up the same repository with the key fetched from GitHub Pages.
 
 Or build the RPM yourself with mock, in a clean chroot of your Fedora
 release, and install it:
@@ -213,7 +221,8 @@ journalctl --user -u kpxc-secret-service -u kpxc-bus -u kpxc-lock-relay
 
 CI (`.github/workflows/ci.yml`) builds the Fedora 44 x86_64 RPM and the
 SRPM with mock on every push and pull request, and keeps them as workflow
-artifacts.
+artifacts. It also runs the release steps below with a throwaway key and
+installs from the resulting repository the way users do.
 
 To release, set `Version:` in the spec, commit, then tag and push:
 
@@ -222,11 +231,18 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The release workflow (`.github/workflows/release.yml`) checks the tag
-against `Version:`, builds the packages, and runs `make repo`: the RPMs are
-signed, the repository metadata is signed (`repo_gpgcheck`), and the public
-key and a `.repo` file are added. The workflow publishes the repository on
-GitHub Pages and attaches the packages to a GitHub release. The repository
-holds the latest release only.
+against `Version:` and builds the packages. Then:
+
+- `make release-rpm` builds `kpxc-secret-service-release` from the signing
+  key's public half and a `.repo` file for the GitHub Pages URL.
+- `make repo` signs all RPMs, signs the repository metadata
+  (`repo_gpgcheck`), and adds the public key and a `.repo` file.
+
+The workflow publishes the repository on GitHub Pages and creates a GitHub
+release. The release notes name the key fingerprint, and the release package
+is attached as `kpxc-secret-service-release.noarch.rpm`, so the
+`releases/latest/download/` link above always points at the current one. The
+repository holds the latest release only.
 
 One-time setup on GitHub:
 
@@ -237,8 +253,9 @@ One-time setup on GitHub:
 3. Settings → Environments → `github-pages` → Deployment branches and tags:
    add the tag pattern `v*`. By default only the default branch may deploy.
 
-To sign locally: `make rpm && make repo GPG_KEY=you@example.org`. Install
-the tools with `sudo make repo-deps`.
+To build and sign locally:
+`make rpm && make release-rpm repo GPG_KEY=you@example.org`. Install the tools
+with `sudo make repo-deps`.
 
 ## Development
 

@@ -1,4 +1,5 @@
 NAME    := kpxc-secret-service
+VERSION := $(shell sed -n 's/^Version:[[:space:]]*//p' $(NAME).spec)
 DESTDIR ?=
 
 # Fedora paths; the units and scripts refer to these literally.
@@ -14,7 +15,7 @@ SHELL_SCRIPTS  := bin/kpxc-run bin/kpxc-secret libexec/kpxc-keepassxc libexec/sh
 PYTHON_SCRIPTS := bin/kpxc-secret-service libexec/kpxc-lock-relay
 UNITS          := $(wildcard units/*)
 
-.PHONY: all install check lint test sources srpm rpm repo clean build-deps repo-deps test-deps require-root require-mock
+.PHONY: all install check lint test sources srpm rpm release-rpm repo clean require-gpg-key build-deps repo-deps test-deps require-root require-mock
 
 all:
 
@@ -72,17 +73,39 @@ srpm: require-mock sources
 rpm: srpm
 	$(MOCK) --rebuild $(RESULTDIR)/$(NAME)-*.src.rpm
 
-# Signed dnf repository of the packages from `make rpm`, in REPODIR, to be
-# served at REPO_URL. GPG_KEY selects the signing key (fingerprint, key ID or
-# e-mail); GPG_PASSPHRASE_FILE optionally holds its passphrase.
+# Signed dnf repository of the packages from `make rpm` (and `make
+# release-rpm`), in REPODIR, to be served at REPO_URL. GPG_KEY selects the
+# signing key (fingerprint, key ID or e-mail); GPG_PASSPHRASE_FILE optionally
+# holds its passphrase.
 REPODIR             ?= build/repo
 REPO_URL            ?= https://dennisklein.github.io/kpxc-secret-service
 GPG_KEY             ?=
 GPG_PASSPHRASE_FILE ?=
 GPG_ARGS = --batch --yes $(if $(GPG_PASSPHRASE_FILE),--pinentry-mode loopback --passphrase-file $(GPG_PASSPHRASE_FILE))
 
-repo:
-	@[ -n "$(GPG_KEY)" ] || { echo "Set GPG_KEY to the signing key, e.g. make repo GPG_KEY=you@example.org" >&2; exit 1; }
+# $(call repo_file,GPGKEY_URL): the .repo file for REPO_URL
+repo_file = printf '%s\n' '[$(NAME)]' 'name=$(NAME)' 'baseurl=$(REPO_URL)' 'enabled=1' \
+    'gpgcheck=1' 'repo_gpgcheck=1' 'gpgkey=$(1)'
+
+# kpxc-secret-service-release: the .repo file and the public key of GPG_KEY,
+# so that `dnf install <its URL>` sets up the repository. Built into
+# RESULTDIR, where `make repo` picks it up. Needs rpm-build.
+RELEASEDIR := build/release
+
+release-rpm: require-gpg-key
+	rm -rf $(RELEASEDIR)
+	mkdir -p $(RELEASEDIR) $(RESULTDIR)
+	gpg --armor --export '$(GPG_KEY)' > $(RELEASEDIR)/RPM-GPG-KEY-$(NAME)
+	@[ -s $(RELEASEDIR)/RPM-GPG-KEY-$(NAME) ] || { echo "gpg found no key $(GPG_KEY)" >&2; exit 1; }
+	$(call repo_file,file:///etc/pki/rpm-gpg/RPM-GPG-KEY-$(NAME)) > $(RELEASEDIR)/$(NAME).repo
+	cp LICENSE $(RELEASEDIR)/
+	rm -f $(RESULTDIR)/$(NAME)-release-*.rpm
+	rpmbuild -bb $(NAME)-release.spec --define 'pkg_version $(VERSION)' \
+	    --define '_topdir $(CURDIR)/$(RELEASEDIR)/rpmbuild' \
+	    --define '_sourcedir $(CURDIR)/$(RELEASEDIR)' --define '_rpmdir $(CURDIR)/$(RESULTDIR)' \
+	    --define '_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm'
+
+repo: require-gpg-key
 	@ls $(RESULTDIR)/*.rpm 2>/dev/null | grep -qv '\.src\.rpm$$' || { echo "No packages in $(RESULTDIR); run make rpm first" >&2; exit 1; }
 	rm -rf $(REPODIR)
 	mkdir -p $(REPODIR)
@@ -92,9 +115,10 @@ repo:
 	createrepo_c --quiet $(REPODIR)
 	gpg $(GPG_ARGS) --local-user '$(GPG_KEY)' --armor --detach-sign $(REPODIR)/repodata/repomd.xml
 	gpg --armor --export '$(GPG_KEY)' > $(REPODIR)/RPM-GPG-KEY-$(NAME)
-	printf '%s\n' '[$(NAME)]' 'name=$(NAME)' 'baseurl=$(REPO_URL)' 'enabled=1' \
-	    'gpgcheck=1' 'repo_gpgcheck=1' 'gpgkey=$(REPO_URL)/RPM-GPG-KEY-$(NAME)' \
-	    > $(REPODIR)/$(NAME).repo
+	$(call repo_file,$(REPO_URL)/RPM-GPG-KEY-$(NAME)) > $(REPODIR)/$(NAME).repo
+
+require-gpg-key:
+	@[ -n "$(GPG_KEY)" ] || { echo "Set GPG_KEY to the signing key, e.g. GPG_KEY=you@example.org" >&2; exit 1; }
 
 require-mock:
 	@command -v mock >/dev/null || { echo "mock is not installed; run: sudo make build-deps" >&2; exit 1; }
@@ -102,7 +126,7 @@ require-mock:
 # Host packages. These targets must be run as root by the user, e.g.
 # `sudo make build-deps`; the Makefile itself never calls sudo.
 BUILD_DEPS := mock mock-rpmautospec git-core
-REPO_DEPS  := createrepo_c rpm-sign gnupg2
+REPO_DEPS  := createrepo_c rpm-build rpm-sign gnupg2
 TEST_DEPS  := ShellCheck systemd glib2 dbus-daemon dbus-broker keepassxc libsecret \
               desktop-file-utils python3-gobject-base 'python3dist(pykeepass)'
 
@@ -116,7 +140,7 @@ build-deps: require-root
 	    echo "Added $$SUDO_USER to the mock group; log in again (or run 'newgrp mock') before 'make rpm'."; \
 	fi
 
-# For `make repo`.
+# For `make release-rpm` and `make repo`.
 repo-deps: require-root
 	dnf install -y $(REPO_DEPS)
 
