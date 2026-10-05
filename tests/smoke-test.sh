@@ -132,16 +132,23 @@ pass "setup enabled KeePassXC's Secret Service integration"
 pass "setup removed KeePassXC's autostart entry"
 [ -e "$XDG_CONFIG_HOME/kpxc-secret-service/setup-done" ] || fail "setup did not record completion"
 
+# keepassxc for the commands that start it, where the real one is not wanted.
+mkdir -p "$T/stub"
+printf '#!/bin/sh\necho "keepassxc-stub: $*"\n' >"$T/stub/keepassxc"
+chmod +x "$T/stub/keepassxc"
+
 menu=$XDG_DATA_HOME/applications/org.keepassxc.KeePassXC.desktop
 if [ -e /usr/share/applications/org.keepassxc.KeePassXC.desktop ]; then
     grep -qx 'X-KPXC-Secret-Service=true' "$menu" || fail "menu entry not generated"
     if command -v desktop-file-validate >/dev/null; then
         desktop-file-validate "$menu" || fail "invalid menu entry"
     fi
-    mkdir -p "$T/stub"
-    printf '#!/bin/sh\necho "keepassxc-stub: $*"\n' >"$T/stub/keepassxc"
-    chmod +x "$T/stub/keepassxc"
-    launched=$(PATH=$T/stub:$PATH "$PYTHON" - "$menu" "$T/my file.kdbx" <<'EOF'
+    # In a home of its own: with the package installed, the entry runs
+    # `kpxc-secret-service open`, which undoes the setup of users who are not
+    # opted in (this test never opts in).
+    launched=$(HOME=$T/menu-home XDG_CONFIG_HOME=$T/menu-home/.config \
+        XDG_DATA_HOME=$T/menu-home/.local/share PATH=$T/stub:$PATH \
+        "$PYTHON" - "$menu" "$T/my file.kdbx" <<'EOF'
 import subprocess, sys
 from gi.repository import Gio, GLib
 info = Gio.DesktopAppInfo.new_from_filename(sys.argv[1])
@@ -279,6 +286,25 @@ pass "status and doctor run"
 kill -9 "$keepassxc_pid"
 wait "$keepassxc_pid" 2>/dev/null || :
 
+# Opted in, but the service did not start (here: there is no systemd).
+# KeePassXC started anyway would serve the Secret Service on the desktop bus.
+marker=$XDG_CONFIG_HOME/kpxc-secret-service/enabled
+touch "$marker"
+if out=$(PATH=$T/stub:$PATH "$PYTHON" "$repo/bin/kpxc-secret-service" open 2>&1); then
+    fail "open succeeded although the service did not start: $out"
+fi
+case $out in *keepassxc-stub*) fail "open started KeePassXC outside of the service: $out" ;; esac
+pass "open does not start KeePassXC outside of the service it failed to start"
+rm "$marker"
+
+# Not opted in (any more), e.g. after the administrator disabled the user.
+out=$(PATH=$T/stub:$PATH "$PYTHON" "$repo/bin/kpxc-secret-service" open "$T/test.kdbx" 2>&1) ||
+    fail "open without opt-in: $out"
+case $out in *"keepassxc-stub: $T/test.kdbx"*) ;; *) fail "open did not start keepassxc: $out" ;; esac
+grep -qx 'Enabled=false' "$ini" || fail "open without opt-in left FdoSecrets enabled"
+[ ! -e "$menu" ] || fail "open without opt-in left the menu entry"
+pass "open without opt-in undoes the setup, then starts KeePassXC"
+
 # `disable USER` (root only) deletes users.d/USER, so USER must not be a path.
 "$PYTHON" -B - "$repo/bin/kpxc-secret-service" <<'EOF' || fail "users.d accepts paths as user names"
 import importlib.machinery, importlib.util, sys
@@ -295,6 +321,8 @@ assert module.users_d_marker("alice") == module.USERS_DIR / "alice"
 EOF
 pass "disable USER refuses names that point outside of users.d"
 
+"$PYTHON" "$repo/bin/kpxc-secret-service" setup >/dev/null
+grep -qx 'Enabled=true' "$ini" || fail "setup did not enable FdoSecrets again"
 "$PYTHON" "$repo/bin/kpxc-secret-service" disable >/dev/null 2>&1 || :
 grep -qx 'Enabled=false' "$ini" || fail "disable left FdoSecrets enabled"
 [ ! -e "$menu" ] || fail "disable left the menu entry"
