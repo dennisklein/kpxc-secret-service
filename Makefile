@@ -74,9 +74,10 @@ rpm: srpm
 	$(MOCK) --rebuild $(RESULTDIR)/$(NAME)-*.src.rpm
 
 # Signed dnf repository of the packages from `make rpm` (and `make
-# release-rpm`), in REPODIR, to be served at REPO_URL. GPG_KEY selects the
-# signing key (fingerprint, key ID or e-mail); GPG_PASSPHRASE_FILE optionally
-# holds its passphrase.
+# release-rpm`), in REPODIR, to be served at REPO_URL. The source RPM is
+# signed in place, in RESULTDIR. GPG_KEY selects the signing key
+# (fingerprint, key ID or e-mail); GPG_PASSPHRASE_FILE optionally holds its
+# passphrase.
 REPODIR             ?= build/repo
 REPO_URL            ?= https://dennisklein.github.io/kpxc-secret-service
 GPG_KEY             ?=
@@ -111,7 +112,7 @@ repo: require-gpg-key
 	mkdir -p $(REPODIR)
 	find $(RESULTDIR) -maxdepth 1 -name '*.rpm' ! -name '*.src.rpm' -exec cp -t $(REPODIR) {} +
 	rpmsign --define '_gpg_name $(GPG_KEY)' --define '_gpg_sign_cmd_extra_args $(GPG_ARGS)' \
-	    --addsign $(REPODIR)/*.rpm
+	    --addsign $(REPODIR)/*.rpm $(wildcard $(RESULTDIR)/*.src.rpm)
 	createrepo_c --quiet $(REPODIR)
 	gpg $(GPG_ARGS) --local-user '$(GPG_KEY)' --armor --detach-sign $(REPODIR)/repodata/repomd.xml
 	gpg --armor --export '$(GPG_KEY)' > $(REPODIR)/RPM-GPG-KEY-$(NAME)

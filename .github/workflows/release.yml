@@ -5,9 +5,14 @@ name: Release
 # signing key), signs them into a dnf repository, publishes that repository
 # on GitHub Pages and creates a GitHub release with the packages attached.
 #
+# Each job gets only what it needs: the build runs without secrets, signing
+# runs in a fresh container with the key from the `release` environment and
+# refuses any key but the committed RPM-GPG-KEY-kpxc-secret-service, and only
+# the job that creates the release can write to the repository.
+#
 # One-time setup, see README.md ("Releases"):
-#   - secrets GPG_PRIVATE_KEY (ASCII-armored) and, if the key has one,
-#     GPG_PASSPHRASE
+#   - environment `release`, limited to tags matching v*, with the secrets
+#     GPG_PRIVATE_KEY (ASCII-armored) and, if the key has one, GPG_PASSPHRASE
 #   - Settings → Pages → Source: GitHub Actions
 #   - Settings → Environments → github-pages: allow tags matching v*
 
@@ -24,23 +29,22 @@ concurrency:
 
 jobs:
   build:
-    name: Build and sign
+    name: Build
     runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:44
       # mock mounts /proc, /sys and /dev into its chroot.
       options: --privileged
-    permissions:
-      contents: write
     steps:
-      # git before checkout (for .git), tar for upload-pages-artifact.
-      - name: Install tools
-        run: dnf install -y git-core tar gh rpm-build createrepo_c rpm-sign gnupg2
+      # Before checkout, which otherwise falls back to a download without .git.
+      - name: Install git
+        run: dnf install -y git-core
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # rpmautospec derives Release and %changelog from the full history.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check the tag against the spec
         run: |
@@ -54,6 +58,36 @@ jobs:
         with:
           chroot: fedora-44-x86_64
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packages
+          path: results/fedora-44-x86_64/*.rpm
+          if-no-files-found: error
+
+  sign:
+    name: Sign
+    needs: build
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    # Holds the signing key.
+    environment: release
+    outputs:
+      fingerprint: ${{ steps.sign.outputs.fingerprint }}
+    steps:
+      # tar for upload-pages-artifact.
+      - name: Install tools
+        run: dnf install -y make tar rpm-build createrepo_c rpm-sign gnupg2
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packages
+          path: results/fedora-44-x86_64
+
       - name: Create the signed dnf repository
         id: sign
         env:
@@ -61,13 +95,20 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           if [ -z "$GPG_PRIVATE_KEY" ]; then
-              echo "::error::Add the GPG_PRIVATE_KEY repository secret (see README.md)"
+              echo "::error::Add the GPG_PRIVATE_KEY secret to the release environment (see README.md)"
               exit 1
           fi
           GNUPGHOME=$(mktemp -d)
           export GNUPGHOME
           printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
           fingerprint=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
+          # Users verify the key against the committed one, so never sign
+          # with another (e.g. a replaced secret).
+          committed=$(gpg --show-keys --with-colons RPM-GPG-KEY-kpxc-secret-service | awk -F: '$1 == "fpr" { print $10; exit }')
+          if [ "$fingerprint" != "$committed" ]; then
+              echo "::error::GPG_PRIVATE_KEY is $fingerprint, but RPM-GPG-KEY-kpxc-secret-service is $committed"
+              exit 1
+          fi
           passphrase_file=
           if [ -n "$GPG_PASSPHRASE" ]; then
               passphrase_file=$GNUPGHOME/passphrase
@@ -79,14 +120,33 @@ jobs:
               REPO_URL="https://$owner.github.io/${GITHUB_REPOSITORY#*/}"
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: build/repo
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            build/repo/
+            results/fedora-44-x86_64/*.src.rpm
+          if-no-files-found: error
+
+  release:
+    name: Create the GitHub release
+    needs: sign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
 
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          FINGERPRINT: ${{ steps.sign.outputs.fingerprint }}
+          FINGERPRINT: ${{ needs.sign.outputs.fingerprint }}
         run: |
           # Under a fixed name, so that .../releases/latest/download/
           # kpxc-secret-service-release.noarch.rpm always finds it.
@@ -101,7 +161,7 @@ jobs:
 
   pages:
     name: Publish the dnf repository
-    needs: build
+    needs: release
     runs-on: ubuntu-24.04
     permissions:
       pages: write
@@ -111,4 +171,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
