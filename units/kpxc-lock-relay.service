@@ -1,0 +1,12 @@
+[Unit]
+Description=Relay desktop screen-lock signals to KeePassXC on its private D-Bus bus
+Documentation=file:///usr/share/doc/kpxc-secret-service/README.md
+BindsTo=kpxc-secret-service.service
+After=kpxc-secret-service.service
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/kpxc-secret-service/kpxc-lock-relay
+Restart=on-failure
+RestartSec=2s
+Slice=session.slice

@@ -1,0 +1,21 @@
+#!/bin/sh
+# xdg-open as seen by KeePassXC under kpxc-secret-service (see kpxc-keepassxc).
+#
+# Applications opened from KeePassXC (browser for an entry URL, file viewer for
+# an attachment) would otherwise inherit the private bus as their session bus
+# and live in the KeePassXC service's cgroup. Hand them the desktop bus and a
+# scope of their own instead, as if they had been started from the desktop.
+shim_dir=/usr/libexec/kpxc-secret-service/shims
+
+if [ -n "${KPXC_SECRET_SERVICE_DESKTOP_BUS-}" ]; then
+    DBUS_SESSION_BUS_ADDRESS=$KPXC_SECRET_SERVICE_DESKTOP_BUS
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+unset KPXC_SECRET_SERVICE_DESKTOP_BUS
+PATH=${PATH#"$shim_dir:"}
+export PATH
+
+if command -v systemd-run >/dev/null 2>&1; then
+    exec systemd-run --user --scope --quiet --collect --slice=app.slice -- xdg-open "$@"
+fi
+exec xdg-open "$@"

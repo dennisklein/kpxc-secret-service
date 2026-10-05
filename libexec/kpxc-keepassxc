@@ -1,0 +1,34 @@
+#!/bin/sh
+# Run KeePassXC with the private kpxc bus as its session bus, so that its
+# Secret Service integration claims org.freedesktop.secrets there and leaves
+# the desktop session bus to the desktop's own Secret Service (GNOME Keyring).
+#
+# Started by kpxc-secret-service.service; arguments are passed to keepassxc.
+set -eu
+
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}"
+desktop_bus=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+private_bus=unix:path=$XDG_RUNTIME_DIR/kpxc-bus
+
+# KeePassXC is single-instance. If it already runs outside of this service,
+# ours would just hand over to it and exit, and that instance cannot serve the
+# private bus. Bail out with a distinct status so systemd does not retry.
+if gdbus call --session --dest org.freedesktop.DBus \
+    --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.NameHasOwner \
+    org.keepassxc.KeePassXC.MainWindow 2>/dev/null | grep -q true; then
+    title="KeePassXC Secret Service not started"
+    body="KeePassXC is already running outside of kpxc-secret-service. Quit it, then run: kpxc-secret-service open"
+    echo "$title: $body" >&2
+    notify-send --app-name=KeePassXC --icon=keepassxc "$title" "$body" 2>/dev/null || :
+    exit 75
+fi
+
+# Kept for the xdg-open shim: URLs and files opened from KeePassXC belong on
+# the desktop bus.
+KPXC_SECRET_SERVICE_DESKTOP_BUS=$desktop_bus
+DBUS_SESSION_BUS_ADDRESS=$private_bus
+PATH=/usr/libexec/kpxc-secret-service/shims:$PATH
+export KPXC_SECRET_SERVICE_DESKTOP_BUS DBUS_SESSION_BUS_ADDRESS PATH
+
+exec keepassxc "$@"

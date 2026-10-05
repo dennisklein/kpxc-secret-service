@@ -1,0 +1,15 @@
+[Unit]
+Description=Private D-Bus bus for KeePassXC Secret Service
+Documentation=file:///usr/share/doc/kpxc-secret-service/README.md man:dbus-broker-launch(1)
+Requires=kpxc-bus.socket
+After=kpxc-bus.socket
+
+[Service]
+Type=notify
+Sockets=kpxc-bus.socket
+# dbus-broker-launch asks systemd to start kpxc-secret-service.service when a
+# client wants org.freedesktop.secrets on this bus. It reaches systemd through
+# the regular session bus ($DBUS_SESSION_BUS_ADDRESS from the user manager), so
+# never point DBUS_SESSION_BUS_ADDRESS at the private bus in this unit.
+ExecStart=/usr/bin/dbus-broker-launch --scope user --config-file /usr/share/kpxc-secret-service/kpxc-bus.conf
+Slice=session.slice

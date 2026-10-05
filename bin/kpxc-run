@@ -1,0 +1,26 @@
+#!/bin/sh
+# Run a command with KeePassXC's Secret Service bus as its session bus.
+#
+# Meant for Secret Service clients on the command line: secret-tool,
+# git-credential-libsecret, Python keyring, ... Graphical applications would
+# lose the rest of their desktop integration (which lives on the desktop bus).
+set -eu
+
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "Usage: kpxc-run COMMAND [ARG...]" >&2
+    echo "Run COMMAND against KeePassXC's Secret Service instead of the desktop's." >&2
+    [ $# -eq 0 ] && exit 2
+    exit 0
+fi
+
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+socket=$XDG_RUNTIME_DIR/kpxc-bus
+if [ ! -S "$socket" ]; then
+    echo "kpxc-run: $socket does not exist; is kpxc-secret-service enabled for $(id -un)?" >&2
+    echo "kpxc-run: see 'kpxc-secret-service doctor'" >&2
+    exit 1
+fi
+
+DBUS_SESSION_BUS_ADDRESS=unix:path=$socket
+export DBUS_SESSION_BUS_ADDRESS
+exec "$@"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Private D-Bus bus for KeePassXC Secret Service (socket)
+Documentation=file:///usr/share/doc/kpxc-secret-service/README.md
+# The package enables this unit for every user, but it only starts for users
+# who opted in: by the administrator (kpxc-secret-service enable USER) or
+# by themselves (kpxc-secret-service enable).
+ConditionUser=!@system
+ConditionPathExists=|/etc/kpxc-secret-service/users.d/%u
+ConditionPathExists=|%E/kpxc-secret-service/enabled
+
+[Socket]
+ListenStream=%t/kpxc-bus
+SocketMode=0600
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

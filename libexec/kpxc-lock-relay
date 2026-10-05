@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+"""Relay screen-lock signals from the desktop session bus to the kpxc bus.
+
+KeePassXC under kpxc-secret-service has the private bus as its session bus, so
+it no longer hears the desktop's screen saver and would not lock its databases
+when the screen locks. This relay owns the same well-known names on the private
+bus and re-emits the signals KeePassXC subscribes to there, so KeePassXC's own
+"Lock databases when session is locked" setting keeps working unchanged.
+"""
+
+import os
+import sys
+
+from gi.repository import Gio, GLib
+
+# (bus name, object path, interface, member) of each session bus signal
+# KeePassXC's ScreenLockListenerDBus subscribes to.
+SIGNALS = (
+    ("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver",
+     "org.freedesktop.ScreenSaver", "ActiveChanged"),
+    ("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+     "org.gnome.ScreenSaver", "ActiveChanged"),
+    ("org.gnome.SessionManager", "/org/gnome/SessionManager/Presence",
+     "org.gnome.SessionManager.Presence", "StatusChanged"),
+    ("org.xfce.ScreenSaver", "/org/xfce/ScreenSaver",
+     "org.xfce.ScreenSaver", "ActiveChanged"),
+    ("com.canonical.Unity", "/com/canonical/Unity/Session",
+     "com.canonical.Unity.Session", "Locked"),
+)
+
+
+def log(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def main():
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    private_address = "unix:path=" + os.path.join(runtime_dir, "kpxc-bus")
+
+    desktop = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    private = Gio.DBusConnection.new_for_address_sync(
+        private_address,
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+        | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None,
+        None,
+    )
+
+    loop = GLib.MainLoop()
+    status = 0
+
+    def on_closed(_connection, _remote_peer_vanished, _error):
+        nonlocal status
+        log("Lost connection to a bus, exiting")
+        status = 1
+        loop.quit()
+
+    for bus in (desktop, private):
+        bus.set_exit_on_close(False)
+        bus.connect("closed", on_closed)
+
+    def relay(_connection, _sender, path, interface, member, parameters, *_):
+        log(f"Relaying {interface}.{member}{parameters}")
+        private.emit_signal(None, path, interface, member, parameters)
+
+    # The receiving side matches signals by the well-known sender name, so the
+    # relay must own each name on the private bus before re-emitting.
+    for name, path, interface, member in SIGNALS:
+        Gio.bus_own_name_on_connection(private, name, Gio.BusNameOwnerFlags.NONE, None, None)
+        desktop.signal_subscribe(
+            name, interface, member, path, None, Gio.DBusSignalFlags.NONE, relay
+        )
+
+    loop.run()
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

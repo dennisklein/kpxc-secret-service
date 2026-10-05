@@ -1,0 +1,248 @@
+#!/bin/bash
+# End-to-end smoke test of kpxc-secret-service, without systemd:
+#
+#  - a throwaway "desktop" session bus (dbus-daemon) with a fake GNOME Keyring
+#    owning org.freedesktop.secrets and a fake GNOME screen saver,
+#  - the private bus, run by dbus-broker-launch with kpxc-bus.conf on a socket
+#    passed in by systemd-socket-activate (as kpxc-bus.socket would),
+#  - KeePassXC (offscreen) started through libexec/kpxc-keepassxc with a test
+#    database whose root group is exposed to the Secret Service,
+#  - the lock relay, the xdg-open shim and `kpxc-secret-service setup`.
+#
+# Run it as a regular user. Needs dbus-daemon, dbus-broker-launch,
+# systemd-socket-activate, gdbus, keepassxc, secret-tool, python3-gobject and
+# pykeepass. PYTHON selects the interpreter that has gi and pykeepass.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+PYTHON=${PYTHON:-python3}
+
+T=$(mktemp -d)
+pids=()
+cleanup() {
+    # SIGKILL: an offscreen KeePassXC may sit in a dialog nobody can answer.
+    for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null || :; done
+    wait 2>/dev/null || :
+    if [ -n "${KEEP_TMP-}" ]; then echo "kept $T" >&2; else rm -rf "$T"; fi
+}
+trap cleanup EXIT
+
+export HOME=$T/home XDG_CONFIG_HOME=$T/home/.config XDG_DATA_HOME=$T/home/.local/share
+export XDG_RUNTIME_DIR=$T/run TMPDIR=$T/tmp QT_QPA_PLATFORM=offscreen
+export PATH=$repo/bin:$PATH
+unset DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+desktop=unix:path=$XDG_RUNTIME_DIR/bus
+private=unix:path=$XDG_RUNTIME_DIR/kpxc-bus
+
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Command name of the process owning NAME on the bus at ADDRESS, if any.
+owner() {
+    local pid
+    pid=$(gdbus call --address "$1" --dest org.freedesktop.DBus \
+        --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.GetConnectionUnixProcessID "$2" 2>/dev/null |
+        sed -n 's/^(uint32 \([0-9]*\),)$/\1/p') || :
+    if [ -n "$pid" ]; then cat "/proc/$pid/comm"; fi
+}
+
+collection_locked() {
+    gdbus call --address "$private" --dest org.freedesktop.secrets --object-path "$1" \
+        --method org.freedesktop.DBus.Properties.Get org.freedesktop.Secret.Collection Locked
+}
+
+# --- desktop session bus with fake GNOME Keyring and screen saver ----------
+dbus-daemon --session --address="$desktop" --nofork --nopidfile >/dev/null &
+pids+=($!)
+for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.1; done
+export DBUS_SESSION_BUS_ADDRESS=$desktop
+
+"$PYTHON" - >"$T/fake-desktop.log" 2>&1 <<'EOF' &
+import signal
+from gi.repository import Gio, GLib
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+for name in ("org.freedesktop.secrets", "org.gnome.ScreenSaver"):
+    bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                  "RequestName", GLib.Variant("(su)", (name, 4)), None, 0, -1, None)
+
+def screen_locked():
+    bus.emit_signal(None, "/org/gnome/ScreenSaver", "org.gnome.ScreenSaver",
+                    "ActiveChanged", GLib.Variant("(b)", (True,)))
+    return GLib.SOURCE_CONTINUE
+
+GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, screen_locked)
+GLib.MainLoop().run()
+EOF
+fake_desktop=$!
+pids+=("$fake_desktop")
+gdbus wait --session --timeout 10 org.gnome.ScreenSaver
+
+# --- private bus, as kpxc-bus.socket + kpxc-bus.service would run it -------
+# dbus-broker-launch logs straight to journald.
+[ -S /run/systemd/journal/socket ] || fail "dbus-broker-launch needs journald's socket"
+sed "s|/usr/share/kpxc-secret-service/dbus-1/services|$repo/data/dbus-1/services|" \
+    "$repo/data/kpxc-bus.conf" >"$T/kpxc-bus.conf"
+# Like the user manager, hand it the desktop bus to reach "systemd" through.
+systemd-socket-activate --listen="$XDG_RUNTIME_DIR/kpxc-bus" \
+    --setenv=DBUS_SESSION_BUS_ADDRESS --setenv=XDG_RUNTIME_DIR \
+    dbus-broker-launch --scope user --config-file "$T/kpxc-bus.conf" 2>"$T/broker.log" &
+pids+=($!)
+for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/kpxc-bus" ] && break; sleep 0.1; done
+
+activatable=$(gdbus call --address "$private" --dest org.freedesktop.DBus \
+    --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListActivatableNames |
+    grep -o "'[^']*'" | tr -d "'" | sort | paste -sd ' ')
+[ "$activatable" = "org.freedesktop.DBus org.freedesktop.secrets" ] ||
+    fail "activatable names on the private bus: $activatable"
+pass "only org.freedesktop.secrets is activatable on the private bus"
+
+# --- per-user setup ------------------------------------------------------------
+ini=$XDG_CONFIG_HOME/keepassxc/keepassxc.ini
+mkdir -p "$(dirname "$ini")" "$XDG_CONFIG_HOME/autostart"
+cat >"$ini" <<'EOF'
+[General]
+ConfigVersion=2
+UpdateCheckMessageShown=true
+
+[FdoSecrets]
+ConfirmAccessItem=false
+ShowNotification=false
+UnlockBeforeSearch=false
+EOF
+touch "$XDG_CONFIG_HOME/autostart/org.keepassxc.KeePassXC.desktop"
+
+"$PYTHON" "$repo/bin/kpxc-secret-service" setup --once
+
+grep -qx 'Enabled=true' "$ini" || fail "setup did not enable FdoSecrets: $(cat "$ini")"
+grep -qx 'ConfirmAccessItem=false' "$ini" || fail "setup lost existing settings: $(cat "$ini")"
+[ "$(grep -c '^\[FdoSecrets\]' "$ini")" = 1 ] || fail "setup duplicated the section: $(cat "$ini")"
+pass "setup enabled KeePassXC's Secret Service integration"
+[ ! -e "$XDG_CONFIG_HOME/autostart/org.keepassxc.KeePassXC.desktop" ] ||
+    fail "setup kept KeePassXC's autostart entry"
+pass "setup removed KeePassXC's autostart entry"
+[ -e "$XDG_CONFIG_HOME/kpxc-secret-service/setup-done" ] || fail "setup did not record completion"
+
+menu=$XDG_DATA_HOME/applications/org.keepassxc.KeePassXC.desktop
+if [ -e /usr/share/applications/org.keepassxc.KeePassXC.desktop ]; then
+    grep -qx 'X-KPXC-Secret-Service=true' "$menu" || fail "menu entry not generated"
+    if command -v desktop-file-validate >/dev/null; then
+        desktop-file-validate "$menu" || fail "invalid menu entry"
+    fi
+    mkdir -p "$T/stub"
+    printf '#!/bin/sh\necho "keepassxc-stub: $*"\n' >"$T/stub/keepassxc"
+    chmod +x "$T/stub/keepassxc"
+    launched=$(PATH=$T/stub:$PATH "$PYTHON" - "$menu" "$T/my file.kdbx" <<'EOF'
+import subprocess, sys
+from gi.repository import Gio, GLib
+info = Gio.DesktopAppInfo.new_from_filename(sys.argv[1])
+ok, argv = GLib.shell_parse_argv(info.get_commandline())
+assert argv[:2] == ["sh", "-c"] and argv[-1] == "%f", argv
+print(subprocess.run(argv[:-1] + [sys.argv[2]], capture_output=True, text=True).stdout.strip())
+EOF
+)
+    [ "$launched" = "keepassxc-stub: $T/my file.kdbx" ] || fail "menu entry runs: $launched"
+    pass "menu entry parses and hands files to keepassxc"
+fi
+
+# --- KeePassXC on the private bus --------------------------------------------
+PYTHONPATH=${PYKEEPASS_PATH:-} "$PYTHON" - "$T/test.kdbx" <<'EOF'
+import sys
+from lxml import etree
+from pykeepass import create_database
+
+kp = create_database(sys.argv[1], password="pw")
+kp.add_entry(kp.root_group, "kpxc-smoke", "user", "s3cret")
+# Expose the root group to the Secret Service, as Database Settings would.
+meta = kp._xpath("/KeePassFile/Meta", first=True)
+custom = meta.find("CustomData")
+if custom is None:
+    custom = etree.SubElement(meta, "CustomData")
+item = etree.SubElement(custom, "Item")
+etree.SubElement(item, "Key").text = "FDO_SECRETS_EXPOSED_GROUP"
+etree.SubElement(item, "Value").text = "{%s}" % kp.root_group.uuid
+kp.save()
+EOF
+
+echo pw | "$repo/libexec/kpxc-keepassxc" --pw-stdin "$T/test.kdbx" >"$T/keepassxc.log" 2>&1 &
+keepassxc_pid=$!
+pids+=("$keepassxc_pid")
+gdbus wait --address "$private" --timeout 30 org.keepassxc.KeePassXC.MainWindow ||
+    fail "KeePassXC did not appear on the private bus: $(cat "$T/keepassxc.log")"
+gdbus wait --address "$private" --timeout 15 org.freedesktop.secrets
+
+[ "$(owner "$private" org.freedesktop.secrets)" = keepassxc ] ||
+    fail "org.freedesktop.secrets on the private bus is not KeePassXC"
+pass "KeePassXC owns org.freedesktop.secrets on the private bus"
+[ "$(owner "$desktop" org.freedesktop.secrets)" = "$(cat "/proc/$fake_desktop/comm")" ] ||
+    fail "the desktop's Secret Service was displaced"
+[ -z "$(owner "$desktop" org.keepassxc.KeePassXC.MainWindow)" ] ||
+    fail "KeePassXC is on the desktop bus"
+pass "the desktop bus keeps its own Secret Service and does not see KeePassXC"
+
+collection=$(gdbus call --address "$private" --dest org.freedesktop.secrets \
+    --object-path /org/freedesktop/secrets --method org.freedesktop.DBus.Properties.Get \
+    org.freedesktop.Secret.Service Collections | grep -o "/org/freedesktop/secrets/collection/[^']*")
+[ -n "$collection" ] || fail "the test database is not exposed as a collection"
+# --pw-stdin unlocks the database shortly after KeePassXC registers on the bus.
+for _ in $(seq 50); do
+    [ "$(collection_locked "$collection")" = "(<false>,)" ] && break
+    sleep 0.2
+done
+[ "$(collection_locked "$collection")" = "(<false>,)" ] || fail "the test database did not unlock"
+
+[ "$(timeout 20 kpxc-secret lookup Title kpxc-smoke)" = s3cret ] ||
+    fail "kpxc-secret lookup did not return the KeePassXC entry"
+pass "kpxc-secret looks up KeePassXC entries"
+printf stored | timeout 20 kpxc-secret store --label=kpxc-smoke-store smoke key
+[ "$(timeout 20 kpxc-secret lookup smoke key)" = stored ] || fail "store/lookup round trip failed"
+pass "kpxc-secret stores secrets in KeePassXC"
+[ "$(timeout 5 secret-tool lookup Title kpxc-smoke 2>/dev/null)" != s3cret ] ||
+    fail "plain secret-tool reached KeePassXC"
+pass "plain secret-tool still talks to the desktop's Secret Service"
+
+# --- lock relay -------------------------------------------------------------------
+"$PYTHON" "$repo/libexec/kpxc-lock-relay" 2>"$T/relay.log" &
+pids+=($!)
+gdbus wait --address "$private" --timeout 10 org.gnome.ScreenSaver
+kill -USR1 "$fake_desktop"
+for _ in $(seq 50); do
+    [ "$(collection_locked "$collection")" = "(<true>,)" ] && break
+    sleep 0.2
+done
+[ "$(collection_locked "$collection")" = "(<true>,)" ] ||
+    fail "KeePassXC did not lock on the desktop's screen lock: $(cat "$T/relay.log")"
+pass "the relay locks KeePassXC when the desktop's screen locks"
+
+# --- xdg-open shim -------------------------------------------------------------------
+mkdir -p "$T/xdg"
+cat >"$T/xdg/xdg-open" <<'EOF'
+#!/bin/sh
+echo "bus=$DBUS_SESSION_BUS_ADDRESS leaked=${KPXC_SECRET_SERVICE_DESKTOP_BUS-} path=$PATH args=$*"
+EOF
+chmod +x "$T/xdg/xdg-open"
+opened=$(env -i KPXC_SECRET_SERVICE_DESKTOP_BUS="$desktop" DBUS_SESSION_BUS_ADDRESS="$private" \
+    PATH="/usr/libexec/kpxc-secret-service/shims:$T/xdg" /bin/sh "$repo/libexec/shims/xdg-open" https://example.org)
+[ "$opened" = "bus=$desktop leaked= path=$T/xdg args=https://example.org" ] ||
+    fail "xdg-open shim: $opened"
+pass "xdg-open shim hands opened URLs the desktop bus"
+
+# --- status, doctor, disable ---------------------------------------------------------
+for command in status doctor; do
+    out=$("$PYTHON" "$repo/bin/kpxc-secret-service" $command 2>&1) || :
+    case $out in *Traceback*) fail "kpxc-secret-service $command crashed: $out" ;; esac
+done
+pass "status and doctor run"
+
+kill -9 "$keepassxc_pid"
+wait "$keepassxc_pid" 2>/dev/null || :
+"$PYTHON" "$repo/bin/kpxc-secret-service" disable >/dev/null 2>&1 || :
+grep -qx 'Enabled=false' "$ini" || fail "disable left FdoSecrets enabled"
+[ ! -e "$menu" ] || fail "disable left the menu entry"
+pass "disable reverts the per-user setup"
+
+echo "All smoke tests passed."
