@@ -13,7 +13,8 @@ kpxc-run git credential-libsecret get     # any Secret Service client → KeePas
 
 `kpxc-run` sets `DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/kpxc-bus`
 for one command. Don't export it in your shell profile: graphical programs
-would lose their desktop integration.
+would lose their desktop integration. [GUIDES.md](GUIDES.md) shows how to
+keep kubeconfig credentials in KeePassXC.
 
 ## Install
 

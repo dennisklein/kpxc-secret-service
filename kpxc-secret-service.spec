@@ -67,7 +67,7 @@ make check
 
 %files
 %license LICENSE
-%doc README.md
+%doc README.md GUIDES.md
 %{_bindir}/kpxc-secret-service
 %{_bindir}/kpxc-secret
 %{_bindir}/kpxc-run
