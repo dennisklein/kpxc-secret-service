@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -sP
 """Relay screen-lock signals from the desktop session bus to the kpxc bus.
 
 KeePassXC under kpxc-secret-service has the private bus as its session bus, so
