@@ -1,5 +1,5 @@
 Name:           kpxc-secret-service
-Version:        0.1.0
+Version:        0.2.0
 Release:        %autorelease
 Summary:        KeePassXC as Secret Service on a private D-Bus bus, next to GNOME Keyring
 
